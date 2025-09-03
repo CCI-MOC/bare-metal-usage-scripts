@@ -23,6 +23,29 @@ def parse_time_argument(arg):
     return arg
 
 
+def parse_excluded_time_ranges(arg_list: list[str]) -> list[tuple[datetime, datetime]]:
+    def check_overlapping_intervals(intervals: list[tuple[datetime, datetime]]):
+        sorted_intervals = sorted(intervals, key=lambda x: x[0])
+        for i in range(1, len(sorted_intervals)):
+            if sorted_intervals[i][0] < sorted_intervals[i - 1][1]:
+                raise ValueError(
+                    f"Overlapping time ranges: {sorted_intervals[i-1]} and {sorted_intervals[i]}"
+                )
+
+    time_ranges = []
+    for time_range_str in arg_list:
+        start_str, end_str = time_range_str.split(",")
+        start_time, end_time = [parse_time_from_string(i) for i in (start_str, end_str)]
+        if start_time >= end_time:
+            raise ValueError(
+                f"Start time {start_time} must be before end time {end_time}."
+            )
+        time_ranges.append((start_time, end_time))
+
+    check_overlapping_intervals(time_ranges)
+    return time_ranges
+
+
 def default_start_argument():
     d = (datetime.today() - timedelta(days=1)).replace(day=1)
     d = d.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -100,12 +123,24 @@ def main():
             "to 0 for each SU's resources"
         ),
     )
+    parser.add_argument(
+        "--excluded-time-ranges",
+        default=None,
+        nargs="+",
+        help="List of time ranges excluded from billing, in format of '<ISO timestamp>,<ISO timestamp>'.",
+    )
 
     args = parser.parse_args()
 
     logger.info(f"Processing invoices for month {args.invoice_month}.")
     logger.info(f"Interval for processing {args.start} - {args.end}.")
     logger.info(f"Invoice file will be saved to {args.output_file}.")
+
+    excluded_time_ranges = (
+        parse_excluded_time_ranges(args.excluded_time_ranges)
+        if args.excluded_time_ranges
+        else None
+    )
 
     su_rates_dict = {}
     if args.use_nerc_rates:
@@ -129,7 +164,9 @@ def main():
         input_bm_json = json.load(f)
 
     input_invoice = models.BMUsageData.model_validate(input_bm_json)
-    project_invoices = billing.get_project_invoices(input_invoice, args.start, args.end)
+    project_invoices = billing.get_project_invoices(
+        input_invoice, args.start, args.end, excluded_time_ranges
+    )
 
     invoice_writer = billing.InvoiceWriter(
         args.invoice_month,
