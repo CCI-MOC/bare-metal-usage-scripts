@@ -88,8 +88,11 @@ def _get_su_type(lease_info: models.BMNodeUsage):
 
 
 def _get_running_time(
-    lease_info: models.BMNodeUsage, start_time: datetime, end_time: datetime
-):
+    lease_info: models.BMNodeUsage,
+    start_time: datetime,
+    end_time: datetime,
+    excluded_intervals: list[tuple[datetime, datetime]] | None = None,
+) -> int:
     start_time = _clamp_time(lease_info.start_time, start_time, end_time)
     end_time = (
         end_time
@@ -97,7 +100,17 @@ def _get_running_time(
         is None  # Assumes lease is still running if no expire time given
         else _clamp_time(lease_info.expire_time, start_time, end_time)
     )
-    return math.ceil((end_time - start_time).total_seconds() / 3600)
+
+    total_interval_duration = (end_time - start_time).total_seconds()
+    if excluded_intervals:
+        for e_interval_start, e_interval_end in excluded_intervals:
+            e_interval_start = _clamp_time(e_interval_start, start_time, end_time)
+            e_interval_end = _clamp_time(e_interval_end, start_time, end_time)
+            total_interval_duration -= (
+                e_interval_end - e_interval_start
+            ).total_seconds()
+
+    return math.ceil(max(0, total_interval_duration) / 3600)
 
 
 def _clamp_time(time, min_time, max_time):
@@ -109,7 +122,10 @@ def _clamp_time(time, min_time, max_time):
 
 
 def get_project_invoices(
-    bm_usage_data: models.BMUsageData, start_time: datetime, end_time: datetime
+    bm_usage_data: models.BMUsageData,
+    start_time: datetime,
+    end_time: datetime,
+    excluded_time_ranges: list[tuple[datetime, datetime]] | None = None,
 ) -> list[models.ProjectUsage]:
     project_usage_dict = {}
     for lease_info in bm_usage_data.root:
@@ -126,7 +142,9 @@ def get_project_invoices(
             logger.warning(
                 f"Unknown resource class {lease_info.resource_class} (resource {lease_info.resource}) in lease {lease_info.uuid}."
             )
-        su_hours = _get_running_time(lease_info, start_time, end_time)
+        su_hours = _get_running_time(
+            lease_info, start_time, end_time, excluded_time_ranges
+        )
 
         project_usage_dict[project_name].add_usage(su_type, su_hours)
 
