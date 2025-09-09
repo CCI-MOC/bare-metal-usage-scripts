@@ -6,7 +6,7 @@ import logging
 
 from nerc_rates import load_from_url
 
-from bare_metal_billing import models, billing
+from bare_metal_billing import models, billing, s3_bucket, config
 
 
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +69,9 @@ def main():
     )
     parser.add_argument(
         "bm_usage_file",
-        help="Bare Metal usage JSON file to be processed",
+        nargs="?",
+        default=None,
+        help="Bare Metal usage JSON file to be processed. If not provided, defaults to fetching from S3.",
     )
     parser.add_argument(
         "--rate-fc430-su", default=0, type=Decimal, help="Rate of FC430 SU/hr"
@@ -107,6 +109,16 @@ def main():
     logger.info(f"Interval for processing {args.start} - {args.end}.")
     logger.info(f"Invoice file will be saved to {args.output_file}.")
 
+    # Default to fetching lease file one day before billing end date because end date is not-inclusive
+    if args.bm_usage_file:
+        bm_usage_file = args.bm_usage_file
+    else:
+        previous_day = (default_end_argument() - timedelta(days=1)).strftime("%Y%m%d")
+        bm_usage_file = s3_bucket.fetch_s3(
+            config.S3_LEASE_BUCKET,
+            f"{args.invoice_month}/esi-lease-{previous_day}.json",
+        )
+
     su_rates_dict = {}
     if args.use_nerc_rates:
         nerc_repo_rates = load_from_url()
@@ -125,7 +137,7 @@ def main():
         su_rates_dict,
     )
 
-    with open(args.bm_usage_file, "r") as f:
+    with open(bm_usage_file, "r") as f:
         input_bm_json = json.load(f)
 
     input_invoice = models.BMUsageData.model_validate(input_bm_json)

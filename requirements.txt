@@ -1,2 +1,3 @@
 git+https://github.com/CCI-MOC/nerc-rates@d3bcfb2#egg=nerc_rates
 pydantic
+boto3
