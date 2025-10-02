@@ -1,5 +1,5 @@
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import argparse
 import logging
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_time_from_string(time_str: str) -> datetime:
-    return datetime.fromisoformat(time_str)
+    return datetime.fromisoformat(time_str).replace(tzinfo=timezone.utc)
 
 
 def parse_time_argument(arg):
@@ -23,14 +23,36 @@ def parse_time_argument(arg):
     return arg
 
 
+def parse_time_range(arg: str):
+    start_str, end_str = arg.split(",")
+    start_time, end_time = [parse_time_from_string(i) for i in (start_str, end_str)]
+    if start_time >= end_time:
+        raise argparse.ArgumentTypeError(
+            f"Start time {start_time} must be before end time {end_time}."
+        )
+    return start_time, end_time
+
+
+def check_overlapping_intervals(arg_list: list[tuple[datetime, datetime]] | None):
+    if not arg_list:
+        return
+
+    sorted_intervals = sorted(arg_list, key=lambda x: x[0])
+    for i in range(1, len(sorted_intervals)):
+        if sorted_intervals[i][0] < sorted_intervals[i - 1][1]:
+            raise ValueError(
+                f"Overlapping time ranges: {sorted_intervals[i-1]} and {sorted_intervals[i]}"
+            )
+
+
 def default_start_argument():
-    d = (datetime.today() - timedelta(days=1)).replace(day=1)
+    d = (datetime.today() - timedelta(days=1)).replace(day=1, tzinfo=timezone.utc)
     d = d.replace(hour=0, minute=0, second=0, microsecond=0)
     return d
 
 
 def default_end_argument():
-    d = datetime.today()
+    d = datetime.today().replace(tzinfo=timezone.utc)
     d = d.replace(hour=0, minute=0, second=0, microsecond=0)
     return d
 
@@ -100,12 +122,22 @@ def main():
             "to 0 for each SU's resources"
         ),
     )
+    parser.add_argument(
+        "--excluded-time-ranges",
+        type=parse_time_range,
+        default=[],
+        nargs="+",
+        help="List of time ranges excluded from billing, in format of '<ISO timestamp>,<ISO timestamp>'. In UTC time",
+    )
 
     args = parser.parse_args()
 
     logger.info(f"Processing invoices for month {args.invoice_month}.")
     logger.info(f"Interval for processing {args.start} - {args.end}.")
     logger.info(f"Invoice file will be saved to {args.output_file}.")
+
+    check_overlapping_intervals(args.excluded_time_ranges)
+    excluded_time_ranges = args.excluded_time_ranges
 
     su_rates_dict = {}
     if args.use_nerc_rates:
@@ -129,7 +161,9 @@ def main():
         input_bm_json = json.load(f)
 
     input_invoice = models.BMUsageData.model_validate(input_bm_json)
-    project_invoices = billing.get_project_invoices(input_invoice, args.start, args.end)
+    project_invoices = billing.get_project_invoices(
+        input_invoice, args.start, args.end, excluded_time_ranges
+    )
 
     invoice_writer = billing.InvoiceWriter(
         args.invoice_month,

@@ -1,8 +1,10 @@
 import tempfile
+from argparse import ArgumentTypeError
 from unittest import TestCase
-from datetime import datetime
+from datetime import datetime, timezone
 
 from bare_metal_billing import billing, models
+from bare_metal_billing.main import parse_time_range, check_overlapping_intervals
 
 
 HOURS_IN_DAY = 24
@@ -226,3 +228,109 @@ class TestProjectUsage(BillingTestBase):
             ),
             4,
         )
+
+    def _get_lease_fixture(self):
+        """Fixture used in tests for excluded time ranges"""
+        return self._get_bm_usage_data(
+            ["P1"],
+            start_times=[datetime(2020, 3, 15, 0, 0, 0)],
+            expire_times=[datetime(2020, 3, 17, 0, 0, 0)],
+            resource_classes=["fc430"],
+        ).root[0]
+
+    def test_single_excluded_interval(self):
+        test_args_list = [
+            (
+                (datetime(2020, 3, 16, 9, 30, 0), datetime(2020, 3, 16, 10, 30, 0)),
+                HOURS_IN_DAY * 2 - 1,
+            ),  # Exclusion within active interval
+            (
+                (datetime(2020, 3, 13, 0, 0, 0), datetime(2020, 3, 16, 0, 0, 0)),
+                HOURS_IN_DAY * 1,
+            ),  # Exclusion starts before active interval
+            (
+                (datetime(2020, 3, 16, 0, 0, 0), datetime(2020, 3, 18, 0, 0, 0)),
+                HOURS_IN_DAY,
+            ),  # Exclusion ends after active interval
+            (
+                (datetime(2020, 3, 1, 0, 0, 0), datetime(2020, 3, 30, 0, 0, 0)),
+                0,
+            ),  # Entire active interval excluded
+        ]
+
+        for excluded_interval, expected_hours in test_args_list:
+            hours = billing._get_running_time(
+                self._get_lease_fixture(),
+                datetime(2020, 3, 15, 0, 0, 0),
+                datetime(2020, 3, 17, 0, 0, 0),
+                [excluded_interval],
+            )
+            self.assertEqual(hours, expected_hours)
+
+    def test_running_time_excluded_intervals_outside_active(self):
+        excluded_intervals = [
+            (datetime(2020, 3, 1, 0, 0, 0), datetime(2020, 3, 5, 0, 0, 0)),
+            (datetime(2020, 3, 10, 0, 0, 0), datetime(2020, 3, 11, 0, 0, 0)),
+            (datetime(2020, 3, 20, 0, 0, 0), datetime(2020, 3, 25, 0, 0, 0)),
+        ]
+        hours = billing._get_running_time(
+            self._get_lease_fixture(),
+            datetime(2020, 3, 12, 0, 0, 0),
+            datetime(2020, 3, 19, 0, 0, 0),
+            excluded_intervals,
+        )
+        self.assertEqual(hours, HOURS_IN_DAY * 2)
+
+    def test_running_time_multiple_excluded_intervals(self):
+        excluded_intervals = [
+            (datetime(2020, 3, 13, 0, 0, 0), datetime(2020, 3, 15, 0, 0, 0)),
+            (datetime(2020, 3, 16, 0, 0, 0), datetime(2020, 3, 17, 0, 0, 0)),
+            (datetime(2020, 3, 18, 0, 0, 0), datetime(2020, 3, 20, 0, 0, 0)),
+        ]
+        lease_info = self._get_bm_usage_data(
+            ["P1"],
+            start_times=[datetime(2020, 3, 14, 0, 0, 0)],
+            expire_times=[datetime(2020, 3, 19, 0, 0, 0)],
+            resource_classes=["fc430"],
+        ).root[0]
+        hours = billing._get_running_time(
+            lease_info,
+            datetime(2020, 3, 14, 0, 0, 0),
+            datetime(2020, 3, 19, 0, 0, 0),
+            excluded_intervals,
+        )
+        self.assertEqual(hours, HOURS_IN_DAY * 2)
+
+
+class TestParseExcludedTimeRanges(BillingTestBase):
+    def test_valid_excluded_time_ranges(self):
+        valid_input = "2023-01-01T06:00:00,2023-01-02T12:00:00"
+        result = parse_time_range(valid_input)
+        self.assertEqual(
+            result,
+            (
+                datetime(2023, 1, 1, 6, 0, 0, tzinfo=timezone.utc),
+                datetime(2023, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+            ),
+        )
+
+    def test_invalid_excluded_time_ranges_format(self):
+        invalid_input = "foo"
+        with self.assertRaises(ValueError):
+            parse_time_range(invalid_input)
+
+    def test_invalid_excluded_time_ranges_order(self):
+        # End time before start time
+        invalid_input = "2023-01-02T00:00:00,2023-01-01T00:00:00"
+        with self.assertRaises(ArgumentTypeError):
+            parse_time_range(invalid_input)
+
+    def test_overlapping_excluded_time_ranges(self):
+        invalid_input = [
+            (
+                datetime(2023, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                datetime(2023, 1, 2, 0, 0, 0, tzinfo=timezone.utc),
+            )
+        ] * 2
+        with self.assertRaises(ValueError):
+            check_overlapping_intervals(invalid_input)
